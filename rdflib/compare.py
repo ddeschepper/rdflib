@@ -276,8 +276,10 @@ _HashT = Callable[[], "HASH"]
 
 
 class _TripleCanonicalizer:
-    def __init__(self, graph: Graph, hashfunc: _HashT = sha256):
+    def __init__(self, graph: Graph, use_improved: bool = False, hashfunc: _HashT = sha256):
         self.graph = graph
+
+        self.use_improved = use_improved
 
         def _hashfunc(s: str):
             h = hashfunc()
@@ -403,7 +405,7 @@ class _TripleCanonicalizer:
             for n in g:
                 groupings[n] = g
         return groupings
-
+    
     @_call_count("individuations")
     def _traces(
         self,
@@ -475,6 +477,45 @@ class _TripleCanonicalizer:
             depth[0] = best_depth  # type: ignore[assignment]
         return discrete[0]
 
+    @_call_count("individuations")
+    def _traces2(
+        self,
+        coloring: list[Color],
+        stats: Stats | None = None,
+        depth: list[int] = [0],
+    ) ->list[Color]:
+        if stats is not None and "prunings" not in stats:
+            stats["prunings"] = 0
+        depth[0] += 1
+        candidates = self._get_candidates(coloring)
+        best_coloring = None
+        best_score = None
+
+        for candidate, color in candidates:
+            coloring_copy: list[Color] = []
+            color_copy = None
+            for c in coloring:
+                c_copy = c.copy()
+                coloring_copy.append(c_copy)
+                if c == color:
+                    color_copy = c_copy
+            new_color = self._individuate(color_copy, candidate)
+            coloring_copy.append(new_color)
+            refined_coloring = self._refine(coloring_copy, [new_color])
+            color_score = tuple(c.key() for c in refined_coloring)
+
+            if best_score is None or best_score < color_score:
+                best_coloring = refined_coloring
+                best_score = color_score
+
+        if best_coloring is None:
+            return coloring
+
+        if not self._discrete(best_coloring):
+            return self._traces2(best_coloring, stats=stats, depth=depth)
+
+        return best_coloring
+
     def canonical_triples(self, stats: Stats | None = None):
         if stats is not None:
             start_coloring = datetime.now()
@@ -491,7 +532,7 @@ class _TripleCanonicalizer:
 
         if not self._discrete(coloring):
             depth = [0]
-            coloring = self._traces(coloring, stats=stats, depth=depth)
+            coloring = self._traces2(coloring, stats=stats, depth=depth) if self.use_improved else self._traces(coloring, stats=stats, depth=depth)
             if stats is not None:
                 stats["tree_depth"] = depth[0]
         elif stats is not None:
@@ -569,14 +610,14 @@ def isomorphic(graph1: Graph, graph2: Graph) -> bool:
     return gd1 == gd2
 
 
-def to_canonical_graph(g1: Graph, stats: Stats | None = None) -> ReadOnlyGraphAggregate:
+def to_canonical_graph(g1: Graph, use_improved: bool = False, stats: Stats | None = None) -> ReadOnlyGraphAggregate:
     """Creates a canonical, read-only graph.
 
     Creates a canonical, read-only graph where all bnode id:s are based on
     deterministical SHA-256 checksums, correlated with the graph contents.
     """
     graph = Graph()
-    graph += _TripleCanonicalizer(g1).canonical_triples(stats=stats)
+    graph += _TripleCanonicalizer(g1, use_improved).canonical_triples(stats=stats)
     return ReadOnlyGraphAggregate([graph])
 
 

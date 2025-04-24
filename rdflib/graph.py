@@ -1437,7 +1437,9 @@ class Graph(Node):
         if base is None:
             base = self.base
 
-        serializer = plugin.get(format, Serializer)(self)
+        from rdflib.plugins.serializers.longturtle import LongTurtleSerializer
+        serializer_class = plugin.get(format, Serializer)
+        serializer = serializer_class(self, use_improved=args.get("use_improved")) if serializer_class is LongTurtleSerializer else serializer_class(self)
         stream: IO[bytes]
         if destination is None:
             stream = BytesIO()

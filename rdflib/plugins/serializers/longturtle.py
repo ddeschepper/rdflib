@@ -42,9 +42,9 @@ class LongTurtleSerializer(RecursiveSerializer):
     short_name = "longturtle"
     indentString = "    "
 
-    def __init__(self, store):
+    def __init__(self, store, use_improved: bool):
         self._ns_rewrite = {}
-        store = to_canonical_graph(store)
+        store = to_canonical_graph(store, use_improved)
         content = store.serialize(format="application/n-triples")
         lines = content.split("\n")
         lines.sort()
