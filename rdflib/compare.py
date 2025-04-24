@@ -74,6 +74,7 @@ Only in second::
 """
 
 from __future__ import annotations
+import sys
 
 # TODO:
 # - Doesn't handle quads.
@@ -214,13 +215,16 @@ class Color:
         self.nodes = nodes
         self.hashfunc = hashfunc
         self._hash_color = None
+        self._cached_key = None
 
     def __str__(self):
         nodes, color = self.key()
         return "Color %s (%s nodes)" % (color, nodes)
 
     def key(self):
-        return (len(self.nodes), self.hash_color())
+        if self._cached_key is None:
+            self._cached_key = (len(self.nodes), self.hash_color())
+        return self._cached_key
 
     def hash_color(self, color: tuple[ColorItem, ...] | None = None) -> str:
         if color is None:
@@ -230,9 +234,9 @@ class Color:
 
         def stringify(x):
             if isinstance(x, Node):
-                return x.n3()
+                return sys.intern(x.n3())
             else:
-                return str(x)
+                return sys.intern(str(x))
 
         if isinstance(color, Node):
             return stringify(color)
@@ -243,17 +247,17 @@ class Color:
         self._hash_cache[color] = val
         return val
 
-    def distinguish(self, W: Color, graph: Graph):  # noqa: N803
+    def distinguish(self, W: Color, triple_index: dict[Node, list[tuple[Node, Node, Node]]]):  # noqa: N803
         colors: dict[str, Color] = {}
         for n in self.nodes:
             new_color: tuple[ColorItem, ...] = list(self.color)  # type: ignore[assignment]
             for node in W.nodes:
-                new_color += [  # type: ignore[operator]
-                    (1, p, W.hash_color()) for s, p, o in graph.triples((n, None, node))
-                ]
-                new_color += [  # type: ignore[operator]
-                    (W.hash_color(), p, 3) for s, p, o in graph.triples((node, None, n))
-                ]
+                for s, p, o in triple_index.get(n, []):
+                    if o == node:
+                        new_color.append((1, p, W.hash_color()))
+                    if s == node:
+                        new_color.append((W.hash_color(), p, 3))
+
             new_color = tuple(new_color)
             new_hash_color = self.hash_color(new_color)
 
@@ -286,6 +290,11 @@ class _TripleCanonicalizer:
 
         self._hash_cache: HashCache = {}
         self.hashfunc = _hashfunc
+
+        self._triple_index = defaultdict(list)
+        for s, p, o in self.graph:
+            self._triple_index[s].append((s, p, o))
+            self._triple_index[o].append((s, p, o))
 
     def _discrete(self, coloring: list[Color]) -> bool:
         return len([c for c in coloring if not c.discrete()]) == 0
@@ -325,8 +334,7 @@ class _TripleCanonicalizer:
             return []
 
     def _individuate(self, color, individual):
-        new_color = list(color.color)
-        new_color.append((len(color.nodes),))
+        new_color = color.color + ((len(color.nodes),),)
 
         color.nodes.remove(individual)
         c = Color(
@@ -347,7 +355,7 @@ class _TripleCanonicalizer:
             for c in coloring[:]:
                 if len(c.nodes) > 1 or isinstance(c.nodes[0], BNode):
                     colors = sorted(
-                        c.distinguish(W, self.graph),
+                        c.distinguish(W, self._triple_index),
                         key=lambda x: x.key(),
                         reverse=True,
                     )
@@ -405,75 +413,42 @@ class _TripleCanonicalizer:
         return groupings
 
     @_call_count("individuations")
-    def _traces(
-        self,
-        coloring: list[Color],
-        stats: Stats | None = None,
-        depth: list[int] = [0],
-    ) -> list[Color]:
-        if stats is not None and "prunings" not in stats:
-            stats["prunings"] = 0
+    def _traces(self, coloring: List[Color], stats: Optional[Dict[str, Union[int, float]]] = None, depth: Optional[List[int]] = None) -> List[Color]:
+        if stats is not None:
+            stats.setdefault("individuations", 0)
+            stats.setdefault("prunings", 0)
+        if depth is None:
+            depth = [0]
         depth[0] += 1
-        candidates = self._get_candidates(coloring)
-        best: list[list[Color]] = []
-        best_score = None
-        best_experimental_score = None
-        last_coloring = None
-        generator: dict[Node, set[Node]] = defaultdict(set)
-        visited: set[Node] = set()
-        for candidate, color in candidates:
-            if candidate in generator:
-                v = generator[candidate] & visited
-                if len(v) > 0:
-                    visited.add(candidate)
-                    continue
-            visited.add(candidate)
-            coloring_copy: list[Color] = []
-            color_copy = None
-            for c in coloring:
-                c_copy = c.copy()
-                coloring_copy.append(c_copy)
-                if c == color:
-                    color_copy = c_copy
-            new_color = self._individuate(color_copy, candidate)
-            coloring_copy.append(new_color)
-            refined_coloring = self._refine(coloring_copy, [new_color])
-            color_score = tuple([c.key() for c in refined_coloring])
-            experimental = self._experimental_path(coloring_copy)
-            experimental_score = set([c.key() for c in experimental])
-            if last_coloring:
-                generator = self._create_generator(  # type: ignore[unreachable]
-                    [last_coloring, experimental], generator
-                )
-            last_coloring = experimental
-            if best_score is None or best_score < color_score:  # type: ignore[unreachable]
-                best = [refined_coloring]
-                best_score = color_score
-                best_experimental_score = experimental_score
-            elif best_score > color_score:  # type: ignore[unreachable]
-                # prune this branch.
+
+        best_coloring: Optional[List[Color]] = None
+        best_score: Optional[Tuple] = None
+
+        for c in [c for c in coloring if not c.discrete()]:
+            for node in c.nodes:
                 if stats is not None:
-                    stats["prunings"] += 1
-            elif experimental_score != best_experimental_score:
-                best.append(refined_coloring)
-            else:
-                # prune this branch.
-                if stats is not None:
-                    stats["prunings"] += 1
-        discrete: list[list[Color]] = [x for x in best if self._discrete(x)]
-        if len(discrete) == 0:
-            best_score = None
-            best_depth = None
-            for coloring in best:
-                d = [depth[0]]
-                new_color = self._traces(coloring, stats=stats, depth=d)
-                color_score = tuple([c.key() for c in refined_coloring])
-                if best_score is None or color_score > best_score:  # type: ignore[unreachable]
-                    discrete = [new_color]
+                    stats["individuations"] += 1
+                coloring_copy = [c.copy() for c in coloring]
+                color_copy = next(cc for cc in coloring_copy if cc.nodes == c.nodes)
+                new_color = self._individuate(color_copy, node)
+                coloring_copy.append(new_color)
+                refined_coloring = self._refine(coloring_copy, [new_color])
+                color_score = tuple(col.key() for col in refined_coloring)
+
+                if best_score is None or color_score > best_score:
+                    best_coloring = refined_coloring
                     best_score = color_score
-                    best_depth = d[0]
-            depth[0] = best_depth  # type: ignore[assignment]
-        return discrete[0]
+
+        if best_coloring is None:
+            return coloring  # fallback
+
+        if not self._discrete(best_coloring):
+            return self._traces(best_coloring, stats=stats, depth=depth)
+
+        if stats is not None:
+            stats["tree_depth"] = max(stats.get("tree_depth", 0), depth[0])
+
+        return best_coloring
 
     def canonical_triples(self, stats: Stats | None = None):
         if stats is not None:
