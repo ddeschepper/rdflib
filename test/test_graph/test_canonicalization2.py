@@ -1,13 +1,9 @@
 import pytest
-import sys
 
 from datetime import datetime
 from rdflib import Graph, BNode, Literal, Namespace
 
 from rdflib.compare import _TripleCanonicalizer
-
-
-sys.setrecursionlimit(10_000)
 
 
 def canonicalize_triples(graph: Graph, use_improved: bool):
@@ -1613,7 +1609,7 @@ def test_performance():
     assert t_original == t_optimized, "Optimized version deviates from original on critical edge case"
     assert t_optimized_time < 4, "Optimized execution time"
 
-def test_failure_case_exposes_difference():
+def test_failure_case_exposes_difference2():
     """
     This graph has symmetrical bnodes with identical structure and values.
     Only the original version explores all individuation paths to reach discrete coloring.
@@ -1693,3 +1689,34 @@ def test_mandatory_path_exploration_case():
     t_opt = canonicalize_triples(g, use_improved=True)
 
     assert t_orig == t_opt, "Optimized version failed to handle path-sensitive individuation properly"
+
+def generate_large_ambiguous_graph(num_clusters=10, cluster_size=5):
+    """
+    Generate a large graph composed of multiple fully symmetric clusters of blank nodes.
+    Each cluster forms a fully connected graph with identical structure and labels.
+    """
+    g = Graph()
+    g.bind("", EX)
+    for cluster_id in range(num_clusters):
+        bnodes = [BNode() for _ in range(cluster_size)]
+
+        # Each bnode connects to all others in the cluster with same structure
+        for i, bn1 in enumerate(bnodes):
+            g.add((EX[f"cluster{cluster_id}"], EX.connect, bn1))
+            g.add((bn1, EX.label, Literal("X")))
+            for j, bn2 in enumerate(bnodes):
+                if i != j:
+                    g.add((bn1, EX.link, bn2))
+    return g
+
+
+def test_large_scale_symmetric_graph():
+    """
+    A large graph with high structural symmetry. Forces _traces to individuate deeply.
+    Should still produce the same canonical result with both strategies.
+    """
+    g = generate_large_ambiguous_graph(num_clusters=10, cluster_size=5)
+    t_orig = canonicalize_triples(g, use_improved=False)
+    t_opt = canonicalize_triples(g, use_improved=True)
+
+    assert t_orig == t_opt, "Mismatch in large-scale ambiguous graph canonicalization"
